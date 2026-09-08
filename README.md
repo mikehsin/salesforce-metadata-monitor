@@ -28,6 +28,23 @@ using an integration user only you control.
 It is not a deployment pipeline, doesn't touch Dev/Prod, and never
 writes to Salesforce.
 
+## Table of contents
+
+- [Why this exists](#why-this-exists)
+- [How it works](#how-it-works)
+- [Monitored metadata](#monitored-metadata)
+- [Evidence format](#evidence-format)
+- [Known limitations](#known-limitations)
+- [Setup](#setup)
+  - [Files you need to edit](#files-you-need-to-edit)
+  - [1. Salesforce side](#1-salesforce-side-needs-system-administrator-access-to-the-org)
+  - [2. Get the project running in VS Code](#2-get-the-project-running-in-vs-code)
+  - [3. Wire it up on GitHub](#3-wire-it-up-on-github)
+- [Deletion scanning](#deletion-scanning)
+- [Safety rules](#safety-rules)
+- [Repository layout](#repository-layout)
+- [License](#license)
+
 ## How it works
 
 ```
@@ -139,13 +156,48 @@ commit history.
 
 ---
 
-## Getting it running
+## Setup
 
 You'll do three things: set up a Salesforce integration user, clone
 this repo and connect it to your own GitHub account, then wire the two
 together with GitHub Secrets. None of this touches the client's own
 tooling or requires their involvement beyond normal org access you
 likely already have.
+
+> **The only two steps most people actually need:** create the
+> Salesforce integration user + External Client App ([1a–1c](#1-salesforce-side-needs-system-administrator-access-to-the-org)),
+> then paste the three resulting values into GitHub Secrets ([step 3](#3-wire-it-up-on-github)).
+> Everything else works out of the box with no code changes.
+
+### What each file does
+
+| File | Purpose |
+| --- | --- |
+| `scripts/check_changes.py` | Queries Salesforce for anything modified since the last check; also has the optional `--check-deletions` full-scan mode |
+| `scripts/capture_changes.py` | For each detected change: resolves who made it, retrieves the component, diffs it, checks Setup Audit Trail, writes the evidence folder |
+| `.github/workflows/monitor.yml` | The scheduler — runs the two scripts above every 5 minutes (and the deletion scan once a day) via GitHub Actions |
+| `manifest/package.xml` | Tells the Salesforce CLI which metadata types to retrieve |
+| `state/monitoring-state.json` | The bot's memory — "last processed" timestamp per metadata type. You create this once from the `.example.json` template; the bot updates it automatically after that |
+| `force-app/` | Where the actual retrieved Salesforce metadata lives — this is what gets diffed and committed |
+| `audit/` | Auto-created. One folder per captured change, holding the evidence (diff, resolved user, Setup Audit Trail match) |
+| `reports/deletion-scans/` | Auto-created. Daily reports of components that may have been deleted |
+
+### Files you need to edit
+
+Everything below is only needed if you want to change the default
+behavior. A first-time setup only touches the first row.
+
+| File | What to change | When |
+| --- | --- | --- |
+| `state/monitoring-state.json` | Doesn't exist yet — copy from `state/monitoring-state.example.json` and fill in real timestamps | Always, once, during setup (step 2.4) |
+| `manifest/package.xml` | Add/remove `<types>` blocks | Only if you want to monitor different/additional metadata types than the default (Apex, Flow, LWC, Custom Object/Metadata) |
+| `scripts/check_changes.py` | `MONITORED_TYPES` dict (near the top) | Only if you changed `package.xml`'s scope — this dict must match it, since it drives what gets polled |
+| `.github/workflows/monitor.yml` | The two cron schedules (`*/5 * * * *` and the daily deletion scan) | Only if you want a different polling interval |
+| `sfdx-project.json` | `name` field | Cosmetic only — safe to leave as-is |
+
+Nothing else needs editing — no file contains Salesforce credentials,
+org IDs, or anything org-specific. Those all live in GitHub Secrets
+(step 3 below), not in the repo.
 
 ### 1. Salesforce side (needs System Administrator access to the org)
 
