@@ -1,0 +1,121 @@
+name: Salesforce Metadata Monitor
+
+on:
+  schedule:
+    - cron: "*/5 * * * *" # modification detection
+    - cron: "0 0 * * *"   # daily deletion scan (UTC — adjust to your timezone)
+
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: salesforce-metadata-monitor
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Salesforce CLI
+        run: npm install --global @salesforce/cli
+
+      - name: Authenticate Salesforce
+        env:
+          SF_CLIENT_ID: ${{ secrets.SF_CLIENT_ID }}
+          SF_CLIENT_SECRET: ${{ secrets.SF_CLIENT_SECRET }}
+          SF_LOGIN_URL: ${{ secrets.SF_LOGIN_URL }}
+        run: |
+          set -euo pipefail
+
+          RESPONSE=$(curl -s -X POST "${SF_LOGIN_URL}/services/oauth2/token" \
+            -d "grant_type=client_credentials" \
+            -d "client_id=${SF_CLIENT_ID}" \
+            -d "client_secret=${SF_CLIENT_SECRET}")
+
+          ACCESS_TOKEN=$(echo "$RESPONSE" | python3 -c "import sys, json; print(json.load(sys.stdin)['access_token'])")
+
+          if [ -z "$ACCESS_TOKEN" ]; then
+            echo "::error::Failed to obtain Salesforce access token"
+            exit 1
+          fi
+
+          echo "::add-mask::$ACCESS_TOKEN"
+
+          # sf org login access-token does not accept the token via stdin.
+          # Per its own --help: for CI/CD, set SF_ACCESS_TOKEN and pass --no-prompt.
+          export SF_ACCESS_TOKEN="$ACCESS_TOKEN"
+
+          sf org login access-token \
+            --instance-url "$SF_LOGIN_URL" \
+            --alias TARGET_ORG \
+            --no-prompt
+
+          unset SF_ACCESS_TOKEN ACCESS_TOKEN RESPONSE
+
+      - name: Check for Salesforce changes
+        id: check
+        run: |
+          python scripts/check_changes.py --target-org TARGET_ORG > changes.json
+          COUNT=$(python3 -c "import json; print(json.load(open('changes.json'))['count'])")
+          echo "count=$COUNT" >> "$GITHUB_OUTPUT"
+          cat changes.json
+
+      - name: Capture Salesforce changes
+        if: steps.check.outputs.count != '0'
+        run: |
+          python scripts/capture_changes.py --target-org TARGET_ORG --changes changes.json --environment "${{ vars.MONITOR_ENVIRONMENT || 'UAT' }}"
+
+      - name: Commit evidence
+        if: steps.check.outputs.count != '0'
+        run: |
+          git config user.name "Salesforce Metadata Monitor"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          if git diff --quiet && git diff --cached --quiet -- force-app audit state; then
+            echo "No repository changes to commit."
+            exit 0
+          fi
+
+          git add force-app audit state
+          git commit -m "chore: capture metadata changes ($(date -u +%Y-%m-%dT%H:%M:%SZ))"
+          git push
+
+      - name: Daily deletion scan
+        if: github.event.schedule == '0 0 * * *' || github.event_name == 'workflow_dispatch'
+        run: |
+          python scripts/check_changes.py --target-org TARGET_ORG --check-deletions > deletion_scan.json
+          DELETION_COUNT=$(python3 -c "import json; print(json.load(open('deletion_scan.json'))['deletionCount'])")
+          echo "Deletion scan found: $DELETION_COUNT"
+
+          if [ "$DELETION_COUNT" = "0" ]; then
+            echo "No likely deletions found."
+            exit 0
+          fi
+
+          mkdir -p reports/deletion-scans
+          REPORT_PATH="reports/deletion-scans/$(date -u +%Y-%m-%dT%H%M%SZ).json"
+          cp deletion_scan.json "$REPORT_PATH"
+
+          git config user.name "Salesforce Metadata Monitor"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$REPORT_PATH"
+          git commit -m "chore: daily deletion scan report ($(date -u +%Y-%m-%dT%H:%M:%SZ)) — $DELETION_COUNT likely deletion(s), review manually"
+          git push
