@@ -149,23 +149,93 @@ likely already have.
 
 ### 1. Salesforce side (needs System Administrator access to the org)
 
-1. **Setup → Permission Sets → New.** Create one (e.g. `Metadata Monitor`),
-   and under **System Permissions** enable:
-   `API Enabled`, `View All Data`, `Author Apex`,
-   `View Setup and Configuration`, `View All Users`.
-2. **Setup → Users → New User.** Create a dedicated integration user
-   (not your own user) with a minimal profile — the Permission Set
-   above supplies the actual access. Assign it the Permission Set.
-3. **Setup → External Client Apps → New External Client App.**
-   Enable OAuth, add the `api` scope, and turn on the **Client
-   Credentials Flow**. Set its "Run As" user to the integration user
-   from step 2.
-4. Open the app and note the **Consumer Key** and **Consumer Secret**
-   (may require "Manage Consumer Details" + an email verification
-   step). Also note your org's **My Domain login URL**
-   (`https://<yourdomain>.my.salesforce.com`, or
-   `https://<yourdomain>--<sandboxname>.sandbox.my.salesforce.com` for
-   a sandbox).
+You're building three things, in order: a Permission Set (what the bot
+can access), an integration user (who the bot acts as), and an
+External Client App (how the bot proves who it is). Each depends on
+the previous one existing.
+
+#### 1a. Create the Permission Set
+
+1. **Setup** (gear icon, top right) → type `Permission Sets` into the
+   Quick Find box → click **Permission Sets**.
+2. Click **New**.
+3. Fill in:
+   - **Label**: `Metadata Monitor` (API Name auto-fills to
+     `Metadata_Monitor` — leave it)
+   - **License**: leave as **"—None—"**
+4. Click **Save**.
+5. On the Permission Set's overview page, click **System Permissions**.
+6. Click **Edit**, and check these boxes:
+   - **API Enabled**
+   - **View All Data**
+   - **Author Apex**
+   - **View Setup and Configuration**
+   - **View All Users**
+7. Click **Save**.
+
+#### 1b. Create the integration user
+
+1. **Setup** → Quick Find → `Users` → click **Users**.
+2. Click **New User**.
+3. Fill in:
+   - **First Name**: `Metadata` (or anything identifiable)
+   - **Last Name**: `Monitor`
+   - **Alias**: something ≤8 characters, e.g. `metamon`
+   - **Email**: any address you control (Salesforce may try to send a
+     verification email here)
+   - **Username**: must be globally unique across all of Salesforce —
+     use an email-like format, e.g.
+     `metadata.monitor@yourcompany.com.uatmonitor` (the trailing
+     suffix just keeps it from colliding with a real address)
+   - **User License**: **Salesforce** (or **Salesforce Platform** if
+     your org has spare platform licenses — confirm Tooling API access
+     works under it before relying on it)
+   - **Profile**: **Minimum Access - Salesforce** — real access comes
+     from the Permission Set, not this profile
+4. Uncheck **"Generate new password and notify user immediately"** —
+   not needed, since this user only ever authenticates via OAuth, never
+   a password login.
+5. Click **Save**.
+6. On the new user's page, find the **Permission Set Assignments**
+   related list → click **Edit Assignments** → move `Metadata Monitor`
+   to the "Enabled" column → **Save**.
+
+#### 1c. Create the External Client App
+
+1. **Setup** → Quick Find → `External Client App Manager` → click it.
+2. Click **New External Client App**.
+3. Fill in:
+   - **External Client App Name**: `Metadata Monitor`
+   - **Contact Email**: your email
+   - **Distribution State**: Local
+4. Click **Create**.
+5. Find the app's **API (OAuth)** settings section → **Edit**.
+6. Check **Enable OAuth**.
+7. **Callback URL**: enter a placeholder —
+   `https://login.salesforce.com/services/oauth2/callback` (this field
+   is required but unused by the flow this tool uses).
+8. **OAuth Scopes**: add `Manage user data via APIs (api)`.
+9. Find **Flow Enablement** (or similarly named) and check
+   **Enable Client Credentials Flow**.
+10. Click **Save**.
+11. Find the app's **Policies** (or "Client Credentials Flow") settings
+    → **Edit** → set **Run As** to the integration user from step 1b →
+    **Save**.
+12. Back on the app's main page, find **Consumer Key and Secret**
+    (you may need to click **Manage Consumer Details**, which can
+    trigger an email verification code). Copy both:
+    - **Consumer Key** → this becomes `SF_CLIENT_ID`
+    - **Consumer Secret** → this becomes `SF_CLIENT_SECRET`
+13. Also note your org's **My Domain login URL** — visible in
+    **Setup → My Domain**, formatted as
+    `https://<yourdomain>.my.salesforce.com` for a production/Dev org,
+    or `https://<yourdomain>--<sandboxname>.sandbox.my.salesforce.com`
+    for a sandbox. This becomes `SF_LOGIN_URL`.
+
+At this point you should have three values saved somewhere safe:
+Consumer Key, Consumer Secret, and the My Domain URL. None of these go
+into any file in this repo — they're only ever pasted into GitHub
+Secrets in step 3.
 
 ### 2. Get the project running in VS Code
 
@@ -209,20 +279,38 @@ likely already have.
 
 ### 3. Wire it up on GitHub
 
-1. In your repo: **Settings → Secrets and variables → Actions →
-   New repository secret.** Add:
-   - `SF_CLIENT_ID` — the Consumer Key from step 1.4
-   - `SF_CLIENT_SECRET` — the Consumer Secret from step 1.4
-   - `SF_LOGIN_URL` — the My Domain URL from step 1.4
-2. (Optional) **Settings → Secrets and variables → Actions →
-   Variables** tab: add `MONITOR_ENVIRONMENT` (e.g. `UAT`) — just a
-   label recorded in each captured event, not functional.
-3. Go to **Actions** tab → select the workflow → **Run workflow** to
-   trigger it manually once. Confirm it authenticates and finishes
-   without errors before trusting the 5-minute schedule.
-4. From here it runs on its own. Check back on the repo's commit
-   history whenever you want to see what's changed in the org — no
-   further action needed on your part.
+1. Open your repo on github.com → **Settings** tab → in the left
+   sidebar, **Secrets and variables → Actions**.
+2. Under the **Secrets** tab, click **New repository secret** three
+   times, once for each of:
+
+   | Name (exact, case-sensitive) | Value |
+   | --- | --- |
+   | `SF_CLIENT_ID` | Consumer Key from step 1c.12 |
+   | `SF_CLIENT_SECRET` | Consumer Secret from step 1c.12 |
+   | `SF_LOGIN_URL` | My Domain URL from step 1c.13 |
+
+   For each: paste the **Name** exactly as shown, paste the **Value**,
+   click **Add secret**.
+3. (Optional) Switch to the **Variables** tab → **New repository
+   variable** → Name `MONITOR_ENVIRONMENT`, Value e.g. `UAT` or
+   `Staging`. This is just a label written into each captured
+   `event.json` — purely cosmetic, safe to skip.
+4. Go to the **Actions** tab at the top of the repo. If Actions
+   are disabled by default, click **"I understand my workflows, go
+   ahead and enable them."**
+5. In the left sidebar, click the workflow name (e.g.
+   **Salesforce Metadata Monitor**).
+6. Click **Run workflow** (top right) → select branch `master` →
+   **Run workflow**.
+7. Wait ~1 minute, then click into the run that appears. Confirm every
+   step shows a green check — especially **Authenticate Salesforce**
+   and **Check for Salesforce changes**. If something fails, the step's
+   log will show the actual Salesforce/CLI error message.
+8. Once a manual run succeeds cleanly, the existing `*/5 * * * *`
+   schedule in `.github/workflows/monitor.yml` takes over on its own —
+   no further action needed. Check back on the repo's commit history
+   whenever you want to see what's changed in the org.
 
 ## Deletion scanning
 
